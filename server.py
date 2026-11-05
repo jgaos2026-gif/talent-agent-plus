@@ -24,11 +24,22 @@ Money rules, unchanged from the engine:
   the engine checks.
 
 Limits, stated so they cannot drift:
-- v1 is SINGLE-PROCESS and IN-MEMORY. Restarting the server clears
-  all artists, bookings, shop, campaigns, and sessions. That is the
+- v1 is SINGLE-PROCESS and IN-MEMORY by default. Restarting the server
+  clears all artists, bookings, shop, campaigns, and sessions. That is the
   engine's own in-memory token/store design, not a bug to hide.
   A public multi-user Play Store release needs a real database
   with transactions before it can serve many phones at once.
+- Supabase mode: when SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set
+  in the environment, the server uses the Supabase project as its durable
+  store (supabase_store.py, stdlib PostgREST, service-role key held by
+  the server only). Trial claims go through tap.claim_trial() so
+  one-time-ever holds across restarts; money/state changes go through
+  the security-definer functions. If Supabase is unset or unreachable
+  at startup, the server runs in-memory exactly as before and says so
+  on /api/health ("store": "in-memory"). The runtime engine still holds
+  live state in memory in v1 — the adapter is the durable-store client,
+  not a full engine-to-Postgres migration (that is verified against the
+  live database, not claimed here).
 - This is NOT yet an APK/AAB and NOT on the Play Store. It is the
   working app that a Play Store wrapper (Capacitor/Android Studio)
   will package, and the API the wrapper will call. Publishing
@@ -47,11 +58,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from combined import TalentAgentPlusComplete  # noqa: E402
-from talent_agent_plus import AgentError, split_cleared  # noqa: E402
+from talent_agent_plus import AgentError, split_cleared, OWNER  # noqa: E402
 from secure_agent import AuthError  # noqa: E402
+from supabase_store import SupabaseStore, SupabaseError, TrialAlreadyClaimed  # noqa: E402
 
 APP = TalentAgentPlusComplete()
 VERSION = "1.0.0-app"
+
+# Durable store (Supabase) if configured and reachable at startup;
+# otherwise the existing in-memory store, exactly as before.
+# Never crashes, never logs a key — see supabase_store.py.
+STORE = SupabaseStore.from_env()
+STORE_MODE = "supabase" if STORE.initialize() else "in-memory"
+
+# In-memory trial claims, used ONLY when Supabase is not live.
+# Process-local: does NOT survive a restart (the v1 limit the Supabase
+# wiring removes — tap.claim_trial() is the durable record).
+TRIAL_CLAIMS: set = set()
 
 
 def ser(obj):
@@ -122,7 +145,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_file(os.path.join(HERE, "frontend", name), ctype)
             if path == "/api/health":
                 return self._send(200, {"ok": True, "product": "Talent Agent Plus",
-                                        "version": VERSION, "banking_execution": "NONE_LEDGER_RECEIPT_ONLY"})
+                                        "version": VERSION, "banking_execution": "NONE_LEDGER_RECEIPT_ONLY",
+                                        "store": STORE_MODE, "supabase_configured": STORE.configured})
+            if path == "/api/store/verify":
+                if APP.secure._require(self._token()) != OWNER:
+                    raise AuthError("owner only")
+                if STORE.enabled:
+                    try:
+                        valid = STORE.verify_evidence_chain()
+                    except SupabaseError as e:
+                        raise AgentError("Supabase verify failed: " + str(e))
+                    return self._send(200, {"ok": True, "store": STORE_MODE,
+                                            "evidence_chain_valid": valid})
+                return self._send(200, {"ok": True, "store": STORE_MODE,
+                                        "evidence_chain_valid": None,
+                                        "note": "Supabase is not configured — running in-memory; nothing to verify"})
             if path == "/api/tiers":
                 tok = self._token()
                 return self._send(200, APP.all_tiers(tok))
@@ -293,6 +330,29 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/expenses":
                 return self._send(200, APP.add_expense(tok, body["artist_id"], body.get("category", ""),
                                                        int(body.get("amount_cents", 0)), body.get("note", "")))
+            if path == "/api/trial/claim":
+                # Owner only. Durable when Supabase is live (tap.claim_trial);
+                # process-local claim set when in-memory (does not survive
+                # a restart — the v1 limit the Supabase wiring removes).
+                if APP.secure._require(tok) != OWNER:
+                    raise AuthError("only the owner can claim a trial")
+                email = (body.get("email") or "").strip().lower()
+                if "@" not in email:
+                    raise AgentError("a real email is required to claim a trial")
+                if STORE.enabled:
+                    try:
+                        claimed = STORE.claim_trial(email, body.get("artist_id"))
+                    except TrialAlreadyClaimed as e:
+                        raise AgentError(str(e))
+                    except SupabaseError as e:
+                        raise AgentError("Supabase trial claim failed: " + str(e))
+                    return self._send(200, {"ok": True, "store": STORE_MODE, **claimed})
+                if email in TRIAL_CLAIMS:
+                    raise AgentError("trial already claimed for %s — one trial per email, ever" % email)
+                TRIAL_CLAIMS.add(email)
+                return self._send(200, {"ok": True, "store": STORE_MODE, "email": email,
+                                        "artist_id": body.get("artist_id"), "trial": "claimed",
+                                        "note": "in-memory claim — does not survive a restart"})
             return self._send(404, {"error": "unknown route"})
         except (AgentError, AuthError, KeyError, ValueError, TypeError) as e:
             self._send(400, {"error": str(e)})

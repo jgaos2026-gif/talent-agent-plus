@@ -6,3 +6,11 @@ services:
     buildCommand: echo "stdlib only - no build step"
     startCommand: python3 server.py --host 0.0.0.0 --port $PORT
     healthCheckPath: /
+    envVars:
+      # Durable store (Supabase project "jga-apps"). sync: false means the
+      # values are set in the Render dashboard, never in this file.
+      # Unset = the server runs in-memory exactly as before.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
