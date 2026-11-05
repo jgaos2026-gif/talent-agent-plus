@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Talent Agent Plus — JGA Enterprise</title>
+<link rel="stylesheet" href="/frontend/style.css">
+<link rel="manifest" href="/frontend/manifest.json">
+</head><body>
+<header><h1>JGA ENTERPRISE</h1><div class="muted">Talent Agent Plus — real app, v1 · Black and gold · No bank movement, no live Stripe, no live distributor</div></header>
+<nav>
+<button id="nav-home" onclick="show('home')">Home</button>
+<button id="nav-agent" onclick="show('agent')">Agent</button>
+<button id="nav-shop" onclick="show('shop')">Shop</button>
+<button id="nav-promo" onclick="show('promo')">Promoter</button>
+<button id="nav-prod" onclick="show('prod')">Producer</button>
+<button id="nav-sect" onclick="show('sect')">Secretary</button>
+<button id="nav-money" onclick="show('money')">11VT</button>
+<button id="nav-discover" onclick="show('discover')">Discover</button>
+</nav>
+<main>
+<div class="banner"><strong>Real data only.</strong> This app starts empty — no demo artists, bookings, or sales are seeded. Anything you create here is a real record in this server's in-memory store, and restarting the server clears it. See the limits box on Home before using it for a real artist.</div>
+<div id="out" class="card muted">Loading…</div>
+
+<section id="view-home" class="view">
+<div class="card"><h2>Sign in</h2>
+<p class="muted">First time: set an owner password (8+ characters), then sign in as owner. The owner creates artists and sets their passwords.</p>
+<label>Owner password <input type="password" id="pw"></label>
+<button class="btn" onclick="setupOwner()">Set owner password (first time only)</button>
+<button class="btn2" onclick="loginOwner()">Sign in as owner</button>
+<hr>
+<label>Artist ID <input id="artistId" placeholder="artist-0001"></label>
+<label>Artist password <input type="password" id="artistPw"></label>
+<button class="btn" onclick="loginArtist()">Sign in as artist</button>
+<button class="btn2" onclick="logout()">Sign out</button>
+<p id="who" class="muted"></p></div>
+<div class="card"><h2>Limits — read first</h2>
+<ul>
+<li>Single-process, in-memory v1. Restart clears all data and sessions.</li>
+<li>Payments are recorded only. Stripe is NOT_CONNECTED. Charges are refused by design.</li>
+<li>Social posts are drafts, never posted live. Releases export locally, never to a distributor.</li>
+<li>Cleared money is never toggled by a click. Clearing requires the cleared amount, checked by the engine.</li>
+<li>This is not a licensed talent agency. Union and CA/NY bookings go through a licensed franchised agent or attorney.</li>
+<li>This web app is the working app. An APK/AAB for the Play Store is a packaging step, not included here — it needs Android Studio and your Google Play developer account.</li>
+</ul>
+<button class="btn2" onclick="loadTiers()">Show tiers and prices</button>
+<button class="btn2" onclick="loadPayments()">Show payment connections</button>
+<pre id="homeInfo"></pre></div>
+</section>
+
+<section id="view-agent" class="view" style="display:none">
+<div class="card"><h2>Artist</h2>
+<label>Name <input id="aName"></label>
+<label>Skills, comma separated <input id="aSkills" placeholder="music, acting"></label>
+<label>Location <input id="aLoc" placeholder="Peoria, IL"></label>
+<label>Tier <select id="aTier"><option value="try">Try FREE</option><option value="starter">Starter $19/mo</option><option value="pro">Pro $49/mo</option><option value="full_label">Full Label $129/mo</option></select></label>
+<button class="btn" onclick="addArtist()">Add artist (owner only)</button>
+<label>Artist password to set <input type="password" id="aNewPw"></label>
+<button class="btn2" onclick="setArtistPw()">Set artist password (owner only — uses the Artist ID box on Home)</button></div>
+<div class="card"><h2>Opportunity, then booking</h2>
+<label>Title <input id="oTitle"></label>
+<label>Kind <select id="oKind"><option value="gig">gig</option><option value="acting">acting</option><option value="dancing">dancing</option><option value="theatre">theatre</option><option value="film">film</option><option value="music">music</option></select></label>
+<label>Skills <input id="oSkills" placeholder="music"></label>
+<label>Location <input id="oLoc"></label>
+<label>Date <input type="date" id="oDate"></label>
+<label>Pay, cents <input type="number" id="oPay" value="100000"></label>
+<button class="btn" onclick="addOpp()">Add opportunity (owner only)</button>
+<button class="btn2" onclick="listOpps()">List opportunities</button>
+<pre id="oppList"></pre>
+<label>Artist ID <input id="bArtist"></label>
+<label>Opportunity ID <input id="bOpp" placeholder="opp-0001"></label>
+<button class="btn" onclick="offerBooking()">Offer booking</button>
+<label>Booking ID <input id="bId" placeholder="booking-0001"></label>
+<button class="btn2" onclick="bookingAction('approve')">Approve (artist only)</button>
+<button class="btn2" onclick="bookingAction('confirm')">Confirm</button>
+<button class="btn2" onclick="bookingAction('reject')">Reject</button>
+<button class="btn2" onclick="bookingAction('cancel')">Cancel</button>
+<button class="btn2" onclick="bookingAction('complete')">Complete</button>
+<button class="btn2" onclick="loadCalendar()">Calendar</button>
+<pre id="bookInfo"></pre></div>
+</section>
+
+<section id="view-shop" class="view" style="display:none">
+<div class="card"><h2>Shop</h2>
+<label>Artist ID <input id="sArtist"></label>
+<label>Product name <input id="sName"></label>
+<label>Kind <input id="sKind" placeholder="shirt"></label>
+<label>Price, cents <input type="number" id="sPrice" value="2500"></label>
+<label>Stock <input type="number" id="sStock" value="10"></label>
+<button class="btn" onclick="addProduct()">Add product</button>
+<button class="btn2" onclick="loadShop()">Show shop</button>
+<pre id="shopList"></pre>
+<label>Product ID <input id="sProd"></label>
+<label>Quantity <input type="number" id="sQty" value="1"></label>
+<button class="btn" onclick="orderMerch()">Order</button>
+<label>Order ID <input id="sOrder"></label>
+<button class="btn2" onclick="shopAction('confirm')">Confirm order</button>
+<label>Cleared amount, cents (must equal order total) <input type="number" id="sCleared"></label>
+<button class="btn2" onclick="shopAction('clear')">Clear order</button>
+<button class="btn2" onclick="shopAction('fulfill')">Fulfill order</button>
+<button class="btn2" onclick="shopAction('cancel')">Cancel order</button>
+<label>Restock quantity <input type="number" id="sRestock" value="1"></label>
+<button class="btn2" onclick="restock()">Restock product</button></div>
+</section>
+
+<section id="view-promo" class="view" style="display:none">
+<div class="card"><h2>Promoter — capped campaigns, drafts only</h2>
+<label>Artist ID <input id="cArtist"></label>
+<label>Campaign title <input id="cTitle"></label>
+<label>Channels, comma separated <input id="cChan" placeholder="social"></label>
+<label>Budget cap, cents <input type="number" id="cCap" value="10000"></label>
+<button class="btn" onclick="addCampaign()">Create campaign</button>
+<label>Campaign ID <input id="cId"></label>
+<label>Spend, cents <input type="number" id="cSpend" value="1000"></label>
+<label>Note <input id="cNote"></label>
+<button class="btn2" onclick="campaignSpend()">Spend (capped)</button>
+<label>Draft post text <textarea id="cPost"></textarea></label>
+<button class="btn2" onclick="draftPost()">Save draft (never posts live)</button>
+<label>Draft index <input type="number" id="cIdx" value="0"></label>
+<button class="btn2" onclick="approvePost()">Approve draft (artist only)</button>
+<button class="btn2" onclick="listCampaigns()">List campaigns</button>
+<pre id="campList"></pre></div>
+</section>
+
+<section id="view-prod" class="view" style="display:none">
+<div class="card"><h2>Producer — artist approval only</h2>
+<label>Artist ID <input id="pArtist"></label>
+<label>Release title <input id="pTitle"></label>
+<button class="btn" onclick="addRelease()">Add release</button>
+<label>Release ID <input id="pRel"></label>
+<button class="btn" onclick="startProduction()">Start production</button>
+<label>Production ID <input id="pProd"></label>
+<label>Note <input id="pNote"></label>
+<button class="btn2" onclick="advanceProduction()">Advance stage</button>
+<button class="btn2" onclick="productionNote()">Add production note</button>
+<button class="btn2" onclick="approveRelease()">Approve release (artist only)</button>
+<button class="btn2" onclick="exportRelease()">Export release (local only)</button>
+<button class="btn2" onclick="listProductions()">List productions</button>
+<pre id="prodList"></pre></div>
+</section>
+
+<section id="view-sect" class="view" style="display:none">
+<div class="card"><h2>Secretary, calls, expenses</h2>
+<label>Artist ID <input id="tArtist"></label>
+<label>Task kind <input id="tKind" placeholder="call"></label>
+<label>Task title <input id="tTitle"></label>
+<label>Due <input type="date" id="tDue"></label>
+<button class="btn" onclick="addTask()">Add task</button>
+<label>Task ID <input id="tId"></label>
+<button class="btn2" onclick="completeTask()">Complete task</button>
+<button class="btn2" onclick="loadTasks()">Open tasks</button>
+<button class="btn2" onclick="dailyBrief()">Daily brief</button>
+<pre id="taskList"></pre>
+<label>Call contact <input id="callContact"></label>
+<label>Call purpose <input id="callPurpose"></label>
+<label>Call date <input type="date" id="callDate"></label>
+<button class="btn" onclick="scheduleCall()">Schedule call (log only, not a live phone call)</button>
+<label>Call ID <input id="callId"></label>
+<label>Outcome <input id="callOutcome"></label>
+<label>Notes <input id="callNotes"></label>
+<button class="btn2" onclick="logCall()">Log call outcome</button>
+<button class="btn2" onclick="listCalls()">List calls</button>
+<label>Expense category <input id="expCat"></label>
+<label>Expense, cents <input type="number" id="expAmt"></label>
+<label>Expense note <input id="expNote"></label>
+<button class="btn2" onclick="addExpense()">Add expense</button></div>
+</section>
+
+<section id="view-money" class="view" style="display:none">
+<div class="card"><h2>Collect, cleared only — and the 11VT calculator</h2>
+<label>Booking ID <input id="colBid"></label>
+<label>Cleared amount, cents <input type="number" id="colAmt"></label>
+<label>Stage <select id="colStage"><option value="gig-pay-cleared">gig-pay-cleared</option><option value="merch-cleared">merch-cleared</option><option value="payout-cleared">payout-cleared</option></select></label>
+<button class="btn" onclick="collect()">Collect (cleared only)</button>
+<pre id="receiptOut"></pre>
+<label>Collaborator cut, cents (from V8 only) <input type="number" id="cutAmt" value="0"></label>
+<label>Payee (required) <input id="cutPayee"></label>
+<button class="btn2" onclick="payCut()">Pay cut from V8</button>
+<hr>
+<label>Calculator: cleared gross, cents <input type="number" id="calcGross" value="500000"></label>
+<label>Calculator: cut, cents <input type="number" id="calcCut" value="0"></label>
+<label>Calculator: cleared? <select id="calcCleared"><option value="true">Cleared and verified</option><option value="false">Uncleared</option></select></label>
+<button class="btn" onclick="calc11vt()">Run 11VT calculation</button>
+<pre id="calcOut"></pre></div>
+</section>
+
+<section id="view-discover" class="view" style="display:none">
+<div class="card"><h2>Discover — public, opt-in only</h2>
+<p class="muted">Artists appear here only if they publish. Default is private. Listings show name, bio, skills, and samples — never bookings, money, or private messages.</p>
+<button class="btn" onclick="loadDiscover()">Browse published artists</button>
+<pre id="discList"></pre>
+<label>Artist ID <input id="dArtist"></label>
+<label>Bio <textarea id="dBio"></textarea></label>
+<button class="btn" onclick="publishProfile()">Publish profile</button>
+<button class="btn2" onclick="unpublishProfile()">Unpublish (removes at once)</button>
+<label>Sample title <input id="dSample"></label>
+<label>Sample kind <input id="dKind" placeholder="song"></label>
+<label>Sample notes <input id="dNotes"></label>
+<button class="btn2" onclick="addSample()">Add sample (labeled provided by the artist)</button>
+<hr>
+<label>Artist ID to contact <input id="cArtist2"></label>
+<label>Your name <input id="cName"></label>
+<label>Your contact (shared with that artist only) <input id="cContact"></label>
+<label>Message <textarea id="cMsg"></textarea></label>
+<button class="btn" onclick="requestConnection()">Request connection (pending, not a booking)</button>
+<label>Request ID <input id="cReq"></label>
+<button class="btn2" onclick="decideConnection(true)">Accept request</button>
+<button class="btn2" onclick="decideConnection(false)">Decline request</button></div>
+</section>
+</main>
+<script src="/frontend/app.js"></script>
+<script>if('serviceWorker' in navigator){navigator.serviceWorker.register('/frontend/sw.js').catch(function(){});}</script>
+</body></html>
