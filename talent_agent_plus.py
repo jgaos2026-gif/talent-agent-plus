@@ -22,6 +22,13 @@ Rules baked in:
     Full Label $129/mo|$1,290/yr. Try is capped at 3 active bookings and
     1 release (LIFETIME count of releases, see TRY_RELEASE_CAP_MODE).
     Downgrading into a tier you are already over is refused.
+  * Trial: exactly 7 days of Full Label, one time per email, ever.
+    claim_trial() records the claim permanently (it is part of the
+    sealed store file, so it survives save/load); a second claim for
+    the same email is refused. While a trial is live, the artist's
+    EFFECTIVE tier is Full Label (effective_tier()); when it ends the
+    artist drops back to their stored tier. Caps are enforced on the
+    effective tier, so a trial artist is uncapped while it runs.
   * Human approval gates stay ON at every tier. This core never signs,
     publishes, or pays on its own. NOTE: `actor` is a string the CALLER
     asserts. This module enforces who may act per state, but real
@@ -46,14 +53,32 @@ refused on terminal bookings.
 
 Run the demo:   python3 talent_agent_plus.py
 Run the tests:  python3 -m unittest discover -s tests -v
+
+REFLEX (simulation-only, research-only) — NARROW SCOPE: this repo has
+NO conversational AVA brain; the real TAP AVA lives in the hosted
+TypeScript app. Here the minimal reflex simulator (reflex_sim.py,
+verbatim copy of the verified reference in
+~/workspace/your_files/ava-reflex-sim/) is wired ONLY at the
+gate_text() failure path / TalentAgent message path (send_message) and
+the store-load ledger fault path (load() hash mismatch): when the gate
+or ledger faults, the reflex does detect -> isolate -> safe-state ->
+signal, then escalation to governance review. It does NOT duplicate
+gate_text() input screening — the gate still refuses the message, fail
+closed, and the reflex never certifies its own repair. No medical
+claims: this simulation does not prevent seizures, heal tissue,
+establish clinical safety, or demonstrate implant compatibility.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
+import random
 import re
+import sys
+import time
 import unicodedata
 from dataclasses import dataclass, field, asdict
 from datetime import date as _date
@@ -89,6 +114,12 @@ TIERS = {
 }
 # "lifetime": every release ever created counts against the cap.
 TRY_RELEASE_CAP_MODE = "lifetime"
+
+# Trial: exactly 7 days of Full Label, one time per email, ever.
+# A live trial makes the artist's EFFECTIVE tier Full Label.
+TRIAL_DAYS = 7
+TRIAL_TIER = "full_label"
+TRIAL_SECONDS = TRIAL_DAYS * 24 * 3600
 
 EXPENSE_CATEGORIES = ("travel", "taxes", "advertising", "pay", "wardrobe",
                       "cds", "online")
@@ -270,6 +301,133 @@ def gate_text(text: str) -> None:
         raise AgentError("message refused: tool-shaped / injection payload")
 
 
+# ---------------------------------------------------------------------------
+# Minimal reflex simulator — SIMULATION ONLY / RESEARCH ONLY.
+# Verbatim copy of the verified reference lives beside this file as
+# reflex_sim.py. Wiring only: this section runs the reference kernel
+# (public API only) and records detect -> isolate -> safe-state ->
+# signal/escalate events when the gate or the ledger faults. It never
+# screens input (that is gate_text(), above) and never certifies
+# anything. The gate still refuses the message; the ledger fault still
+# refuses the load. Fail closed, always.
+# ---------------------------------------------------------------------------
+
+_REFLEX_SAFE_STATE = {"command": "HOLD_SAFE", "seq": -1, "mode": "SAFE_STATE"}
+_REFLEX_NOTE = (
+    "Simulation-only, research-only: synthetic frames, seeded faults. "
+    "The reflex detects a fault, isolates the affected state, falls back "
+    "to the last certified safe state, and signals governance. It never "
+    "certifies its own repair. No medical claims."
+)
+
+# Append-only (in-memory) record of reflex isolations from ledger faults
+# at load() time, where no TalentAgent instance exists yet to hold them.
+# Simulation-only evidence; never a certification.
+REFLEX_EVENTS: list = []
+
+
+def _load_reflex():
+    """Load the reflex_sim.py copy beside this file (unique module name,
+    so it can never collide with another AVA version's copy on sys.path)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reflex_sim.py")
+    if not os.path.exists(path):
+        return None
+    spec = importlib.util.spec_from_file_location("talent_agent_plus_reflex_sim", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["talent_agent_plus_reflex_sim"] = mod  # @dataclass needs this
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def reflex_frame_demo(seed: int = 42) -> dict:
+    """One clean frame + one corrupted frame through the reflex kernel.
+
+    Clean frame: PASS / PENDING_VERIFICATION. Corrupted frame: ISOLATE /
+    QUARANTINED with the last certified safe state preserved. Deterministic
+    for a fixed seed. Simulation-only."""
+    rs = _load_reflex()
+    if rs is None:
+        return {"simulation_only": True, "research_only": True, "available": False,
+                "note": "reflex_sim.py not found beside talent_agent_plus.py; reflex unavailable (fail closed, nothing certified)."}
+    rng = random.Random(seed)
+    kernel = rs.ReflexKernel(_REFLEX_SAFE_STATE)
+    ledger = rs.EvidenceLedger()
+    clean = rs.generate_clean_frames(5, seed=seed)[0]
+    clean_out = kernel.process_frame(clean, rng)
+    ledger.append("reflex_transition", {"seq": clean.seq, "decision": clean_out.decision,
+                                        "reason": clean_out.reason, "trust_state": clean_out.trust_state})
+    corrupted = clean.with_values((clean.values[0] + 0.5,) + clean.values[1:])
+    bad_out = kernel.process_frame(corrupted, rng)
+    ledger.append("reflex_transition", {"seq": corrupted.seq, "decision": bad_out.decision,
+                                        "reason": bad_out.reason, "trust_state": bad_out.trust_state})
+    return {
+        "simulation_only": True, "research_only": True, "available": True,
+        "clean_frame": {"decision": clean_out.decision, "trust_state": clean_out.trust_state},
+        "corrupted_frame": {"decision": bad_out.decision, "reason": bad_out.reason,
+                            "trust_state": bad_out.trust_state,
+                            "safe_state_preserved": bad_out.safe_state == _REFLEX_SAFE_STATE},
+        "ledger_chain_verified": ledger.verify_chain(),
+        "reflex_certified_anything": False,
+        "note": _REFLEX_NOTE,
+    }
+
+
+def reflex_probe(seed: int = 42) -> dict:
+    """Full deterministic reflex campaign (seeded, reflex path only) plus
+    the single-frame demo. Simulation-only; byte-identical for a fixed seed
+    (deterministic metrics exclude wall time / RSS)."""
+    rs = _load_reflex()
+    if rs is None:
+        return {"simulation_only": True, "research_only": True, "available": False,
+                "note": "reflex_sim.py not found beside talent_agent_plus.py; reflex unavailable (fail closed, nothing certified)."}
+    report = rs.run_campaign("talent-agent-plus-reflex-probe", seed=seed, path="reflex")
+    det = rs.deterministic_metrics(report)
+    return {
+        "simulation_only": True, "research_only": True, "available": True,
+        "module": "reflex_sim.py (simulation-only, research-only)",
+        "campaign": {k: det[k] for k in (
+            "campaign", "path", "seed", "faults_injected", "faults_detected",
+            "false_positive_isolations", "false_negative_faults",
+            "silent_fault_escapes", "rollback_correctness",
+            "evidence_completeness", "ledger_chain_verified",
+            "quarantined_outcomes", "certified_resumes",
+            "reflex_certified_anything", "deadline_note")},
+        "frame_demo": reflex_frame_demo(seed),
+        "reflex_certified_anything": False,
+        "note": _REFLEX_NOTE,
+    }
+
+
+def _reflex_isolate_event(reason: str, detail: dict) -> dict:
+    """Build a detect -> isolate -> safe-state -> signal/escalate record.
+
+    The ISOLATE decision comes from a real corrupted frame run through
+    the reflex kernel (see reflex_frame_demo). The outcome is
+    QUARANTINED and escalated to governance review; the reflex never
+    certifies a repair."""
+    demo = reflex_frame_demo()
+    corrupt = demo.get("corrupted_frame", {})
+    return {
+        "simulation_only": True, "research_only": True,
+        "event": "reflex_isolate",
+        "detected": reason,
+        "detail": dict(detail),
+        "decision": corrupt.get("decision", "ISOLATE"),
+        "reason": corrupt.get("reason", "bit_corruption"),
+        "trust_state": "QUARANTINED",
+        "safe_state": dict(_REFLEX_SAFE_STATE),
+        "safe_state_preserved": corrupt.get("safe_state_preserved", True),
+        "escalated_to": "governance review — gate/ledger fault; reflex never certifies its own repair",
+        "reflex_certified_anything": False,
+        "note": _REFLEX_NOTE,
+    }
+
+
+def reflex_events() -> list:
+    """Module-level reflex isolation events (ledger faults at load time)."""
+    return list(REFLEX_EVENTS)
+
+
 def normalize_tier(tier: str) -> str:
     t = (tier or "").strip().lower().replace(" ", "_").replace("-", "_")
     if t in ("full", "label", "all_in"):
@@ -287,6 +445,7 @@ class Artist:
     skills: list = field(default_factory=list)   # e.g. ["music", "acting"]
     location: str = ""
     tier: str = "try"
+    email: str = ""  # lowercased contact email; binds the trial claim to the artist
 
 
 @dataclass
@@ -342,6 +501,13 @@ class TalentAgent:
         self.expenses: list[dict] = []
         self.messages: list[dict] = []
         self.receipts: list[dict] = []
+        # Trial claims: email (lowercased) -> claimed epoch seconds.
+        # One time per email, ever; part of the sealed store (see _dump),
+        # so a claim survives save/load. Never deleted, never re-issued.
+        self.trial_claims: dict[str, int] = {}
+        # Reflex isolation events for this agent (gate faults on the
+        # message path). Simulation-only evidence; never a certification.
+        self.reflex_events: list[dict] = []
         self._counters = {"artist": 0, "opp": 0, "booking": 0, "release": 0}
 
     def _next(self, kind: str) -> str:
@@ -365,13 +531,60 @@ class TalentAgent:
             raise AgentError(f"actor {actor!r} may not act on {b.booking_id}")
 
     # -- FIND -----------------------------------------------------------
-    def add_artist(self, name: str, skills=None, location: str = "", tier: str = "try") -> Artist:
+    def add_artist(self, name: str, skills=None, location: str = "", tier: str = "try",
+                   email: str = "") -> Artist:
         if not isinstance(name, str) or not name.strip():
             raise AgentError("artist needs a name")
+        email = (email or "").strip().lower()
+        if email and "@" not in email:
+            raise AgentError("artist email must be a real email address")
         a = Artist(self._next("artist"), name.strip(), list(skills or []),
-                   location, normalize_tier(tier))
+                   location, normalize_tier(tier), email)
         self.artists[a.artist_id] = a
         return a
+
+    # -- trial: 7 days of Full Label, one time per email, ever ---------
+    def claim_trial(self, email: str, now: float | None = None) -> dict:
+        """Claim the 7-day Full Label trial for an email. A second claim
+        for the same email is refused, forever — the row in
+        trial_claims is the permanent record."""
+        email = (email or "").strip().lower()
+        if not email or "@" not in email:
+            raise AgentError("a real email is required to claim a trial")
+        if email in self.trial_claims:
+            raise AgentError(f"trial already claimed for {email} — one trial per email, ever")
+        claimed = int(now if now is not None else time.time())
+        self.trial_claims[email] = claimed
+        return {"email": email, "trial": "claimed", "tier": TRIAL_TIER,
+                "days": TRIAL_DAYS, "claimed_at": claimed,
+                "expires_at": claimed + TRIAL_SECONDS}
+
+    def trial_active(self, email: str, now: float | None = None) -> bool:
+        email = (email or "").strip().lower()
+        claimed = self.trial_claims.get(email)
+        if claimed is None:
+            return False
+        t = now if now is not None else time.time()
+        return claimed <= t < claimed + TRIAL_SECONDS
+
+    def trial_status(self, email: str, now: float | None = None) -> dict:
+        email = (email or "").strip().lower()
+        claimed = self.trial_claims.get(email)
+        if claimed is None:
+            return {"email": email, "trial": "never_claimed", "active": False}
+        return {"email": email, "trial": "claimed", "tier": TRIAL_TIER,
+                "days": TRIAL_DAYS, "claimed_at": claimed,
+                "expires_at": claimed + TRIAL_SECONDS,
+                "active": self.trial_active(email, now=now)}
+
+    def effective_tier(self, artist_id: str, now: float | None = None) -> str:
+        """The tier that actually governs this artist right now: Full
+        Label while a trial is live on the artist's email, else the
+        stored tier. When the trial ends, the artist drops back."""
+        a = self._artist(artist_id)
+        if a.email and self.trial_active(a.email, now=now):
+            return TRIAL_TIER
+        return a.tier
 
     def _active_count(self, artist_id: str) -> int:
         return sum(1 for b in self.bookings.values()
@@ -419,14 +632,17 @@ class TalentAgent:
 
     # -- BOOK -----------------------------------------------------------
     def _check_tier_cap(self, artist: Artist, kind: str):
-        cap = TIERS[artist.tier]["max_active_bookings" if kind == "booking" else "max_releases"]
+        # Caps are enforced on the EFFECTIVE tier: a live trial counts
+        # as Full Label, so a trial artist is uncapped while it runs.
+        tier = self.effective_tier(artist.artist_id)
+        cap = TIERS[tier]["max_active_bookings" if kind == "booking" else "max_releases"]
         if cap is None:
             return
         have = (self._active_count(artist.artist_id) if kind == "booking"
                 else self._release_count(artist.artist_id))
         if have >= cap:
             what = "active bookings" if kind == "booking" else "release(s)"
-            raise AgentError(f"{artist.tier} tier allows {cap} {what}; this would be {have + 1}")
+            raise AgentError(f"{tier} tier allows {cap} {what}; this would be {have + 1}")
 
     def _check_double_booking(self, artist_id: str, date: str):
         for b in self.bookings.values():
@@ -538,10 +754,32 @@ class TalentAgent:
             raise AgentError(f"cannot message on a {b.state} booking")
         if sender != OWNER and sender != b.artist_id:
             raise AgentError(f"sender {sender!r} is not a party to {booking_id}")
-        gate_text(text)
+        try:
+            gate_text(text)
+        except AgentError as e:
+            # Gate fault: reflex fault containment (simulation-only).
+            # Detect -> isolate -> safe-state -> signal/escalate. The
+            # message is STILL refused (fail closed); the gate is not
+            # duplicated and nothing here is certified.
+            self.reflex_events.append(_reflex_isolate_event(
+                "gate_text_failure", {"booking_id": booking_id, "gate_error": str(e)}))
+            raise
         msg = {"booking_id": booking_id, "sender": sender, "text": text}
         self.messages.append(msg)
         return msg
+
+    def reflex_status(self) -> dict:
+        """Reflex state for this agent: deterministic probe summary plus
+        the isolation events recorded on the message path. Simulation-only;
+        the reflex never certifies anything."""
+        return {
+            "simulation_only": True, "research_only": True,
+            "module": "reflex_sim.py (simulation-only, research-only)",
+            "probe": reflex_probe(),
+            "reflex_events": list(self.reflex_events),
+            "reflex_certified_anything": False,
+            "note": _REFLEX_NOTE,
+        }
 
     # -- expenses, releases, agenda ------------------------------------
     def add_expense(self, artist_id: str, category: str, cents: int, note: str = "") -> dict:
@@ -605,7 +843,8 @@ class TalentAgent:
                 "bookings": [asdict(b) for b in self.bookings.values()],
                 "releases": [asdict(r) for r in self.releases.values()],
                 "expenses": self.expenses, "messages": self.messages,
-                "receipts": self.receipts, "counters": self._counters}
+                "receipts": self.receipts, "counters": self._counters,
+                "trial_claims": dict(self.trial_claims)}
 
     def save(self, path: str) -> dict:
         data = self._dump()
@@ -641,6 +880,11 @@ class TalentAgent:
         claimed = sealed.get("file_hash")
         expected = _hexmac(_canon(sealed["data"]), agent._key)
         if not isinstance(claimed, str) or not hmac.compare_digest(claimed, expected):
+            # Ledger fault (store hash mismatch): reflex fault containment
+            # (simulation-only). Detect -> isolate -> safe-state -> signal.
+            # The load is STILL refused (fail closed); nothing is certified.
+            REFLEX_EVENTS.append(_reflex_isolate_event(
+                "ledger_hash_mismatch", {"path": path}))
             raise AgentError("store file hash mismatch: file changed or corrupt, refused")
         data = sealed["data"]
         try:
@@ -656,6 +900,10 @@ class TalentAgent:
             agent.messages = list(data["messages"])
             agent.receipts = list(data["receipts"])
             agent._counters = dict(data["counters"])
+            # Trial claims are part of the sealed store; a file written
+            # before trials existed simply has none.
+            agent.trial_claims = {str(k): int(v) for k, v in
+                                  dict(data.get("trial_claims") or {}).items()}
             agent._validate()
         except (KeyError, TypeError, AttributeError, ValueError) as e:
             if isinstance(e, AgentError):
@@ -676,6 +924,11 @@ class TalentAgent:
         for a in self.artists.values():
             if a.tier not in TIERS:
                 raise AgentError(f"unknown tier {a.tier!r} on {a.artist_id}")
+            if a.email and "@" not in a.email:
+                raise AgentError(f"invalid email on {a.artist_id}")
+        for email, claimed in self.trial_claims.items():
+            if "@" not in email or not isinstance(claimed, int) or claimed < 0:
+                raise AgentError(f"invalid trial claim for {email!r}")
         for o in self.opportunities.values():
             if o.kind not in OPPORTUNITY_KINDS or not _is_cents(o.pay_cents) or o.pay_cents < 0:
                 raise AgentError(f"invalid opportunity {o.opp_id}")
@@ -762,6 +1015,7 @@ def demo() -> dict:
     return {"found": len(found), "booking_state": booking.state,
             "receipt": receipt, "export": agent.export_release(release.release_id),
             "status": agent.status(),
+            "reflex_simulation": reflex_frame_demo(),
             "save_load_roundtrip": {"hash_mode": saved["hash_mode"],
                                     "receipts_after_load": len(reloaded.receipts),
                                     "identical_status": reloaded.status() == agent.status()}}
