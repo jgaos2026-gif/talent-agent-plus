@@ -23,6 +23,7 @@
 <section id="view-home" class="view">
 <div class="card"><h2>Sign in</h2>
 <p class="muted">First time: set an owner password (8+ characters), then sign in as owner. The owner creates artists and sets their passwords.</p>
+<label>One-time owner setup token <input type="password" id="ownerSetupToken" autocomplete="off"></label>
 <label>Owner password <input type="password" id="pw"></label>
 <button class="btn" onclick="setupOwner()">Set owner password (first time only)</button>
 <button class="btn2" onclick="loginOwner()">Sign in as owner</button>
