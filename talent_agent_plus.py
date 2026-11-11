@@ -70,6 +70,7 @@ establish clinical safety, or demonstrate implant compatibility.
 """
 from __future__ import annotations
 
+import bct_verify
 import hashlib
 import hmac
 import importlib.util
@@ -509,6 +510,12 @@ class TalentAgent:
         # message path). Simulation-only evidence; never a certification.
         self.reflex_events: list[dict] = []
         self._counters = {"artist": 0, "opp": 0, "booking": 0, "release": 0}
+        # BCT state chains (milestone 2): booking_id -> hash of the
+        # booking's last certified state. The chain head is the root of
+        # trust for transition verification; it is sealed with the store
+        # file (see _dump/load). Rejections are recorded, never silent.
+        self._bct_chain_head: dict[str, str] = {}
+        self._bct_rejections: list[dict] = []
 
     def _next(self, kind: str) -> str:
         self._counters[kind] += 1
@@ -650,6 +657,27 @@ class TalentAgent:
                     and b.state in ACTIVE_STATES):
                 raise AgentError(f"double booking: artist already has {b.booking_id} on {date}")
 
+    def _bct_certify_transition(self, booking: Booking, to_state: str) -> str:
+        """BCT gate (milestone 2): a booking state change is certified only
+        when the transition is chained to the booking's recorded state hash
+        and actually changes state — the fixed BctVerifier layer-5 rules
+        (see bct_verify.py). Returns the new state hash and advances the
+        chain head. Raises AgentError and records the rejection on any
+        failure: the transition must not proceed."""
+        prior = self._bct_chain_head.get(booking.booking_id, bct_verify.GENESIS)
+        new_state = {"booking_id": booking.booking_id, "state": to_state}
+        declared = bct_verify.state_hash(new_state)
+        transition = bct_verify.compute_transition_hash(declared, prior)
+        ok, reason = bct_verify.verify_transition(prior, new_state, declared, transition)
+        if not ok:
+            self._bct_rejections.append({
+                "booking_id": booking.booking_id, "from_state": booking.state,
+                "to_state": to_state, "reason": reason})
+            raise AgentError(
+                "BCT verification failed for booking %s: %s" % (booking.booking_id, reason))
+        self._bct_chain_head[booking.booking_id] = declared
+        return declared
+
     def offer_booking(self, artist_id: str, opp_id: str, actor: str = OWNER) -> Booking:
         artist = self._artist(artist_id)
         if actor != OWNER and actor != artist_id:
@@ -662,6 +690,7 @@ class TalentAgent:
         self._check_tier_cap(artist, "booking")
         self._check_double_booking(artist_id, opp.date)
         b = Booking(self._next("booking"), artist_id, opp_id, opp.title, opp.date, opp.pay_cents)
+        self._bct_certify_transition(b, "OFFERED")
         b.state = "OFFERED"
         b.record(actor, "offer")
         self.bookings[b.booking_id] = b
@@ -673,6 +702,7 @@ class TalentAgent:
             raise AgentError(f"only an OFFERED booking can be approved (now {b.state})")
         if actor != b.artist_id:
             raise AgentError("only the booked artist can approve")
+        self._bct_certify_transition(b, "APPROVED")
         b.state = "APPROVED"
         b.record(actor, "approve")
         return b
@@ -684,6 +714,7 @@ class TalentAgent:
             raise AgentError(f"only an APPROVED booking can be confirmed (now {b.state})")
         if not any(h.get("action") == "approve" and h.get("actor") == b.artist_id for h in b.history):
             raise AgentError("no recorded artist approval in history; refusing to confirm")
+        self._bct_certify_transition(b, "CONFIRMED")
         b.state = "CONFIRMED"
         b.record(actor, "confirm")
         return b
@@ -693,6 +724,7 @@ class TalentAgent:
         self._owner_or_artist(b, actor)
         if b.state not in ("DRAFT", "OFFERED", "APPROVED"):
             raise AgentError(f"cannot reject a {b.state} booking")
+        self._bct_certify_transition(b, "REJECTED")
         b.state = "REJECTED"
         b.record(actor, "reject")
         return b
@@ -702,6 +734,7 @@ class TalentAgent:
         self._owner_or_artist(b, actor)
         if b.state != "CONFIRMED":
             raise AgentError(f"only a CONFIRMED booking can be cancelled (now {b.state})")
+        self._bct_certify_transition(b, "CANCELLED")
         b.state = "CANCELLED"
         b.record(actor, "cancel")
         return b
@@ -711,6 +744,7 @@ class TalentAgent:
         self._owner_or_artist(b, actor)
         if b.state != "CONFIRMED":
             raise AgentError(f"only a CONFIRMED booking can be completed (now {b.state})")
+        self._bct_certify_transition(b, "COMPLETED")
         b.state = "COMPLETED"
         b.record(actor, "complete")
         return b
@@ -844,7 +878,8 @@ class TalentAgent:
                 "releases": [asdict(r) for r in self.releases.values()],
                 "expenses": self.expenses, "messages": self.messages,
                 "receipts": self.receipts, "counters": self._counters,
-                "trial_claims": dict(self.trial_claims)}
+                "trial_claims": dict(self.trial_claims),
+                "bct_chain_head": dict(self._bct_chain_head)}
 
     def save(self, path: str) -> dict:
         data = self._dump()
@@ -904,6 +939,10 @@ class TalentAgent:
             # before trials existed simply has none.
             agent.trial_claims = {str(k): int(v) for k, v in
                                   dict(data.get("trial_claims") or {}).items()}
+            # BCT chain heads are part of the sealed store; a file written
+            # before BCT gating existed simply has none.
+            agent._bct_chain_head = {str(k): str(v) for k, v in
+                                     dict(data.get("bct_chain_head") or {}).items()}
             agent._validate()
         except (KeyError, TypeError, AttributeError, ValueError) as e:
             if isinstance(e, AgentError):
