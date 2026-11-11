@@ -38,6 +38,11 @@ class ReflexInstallTests(unittest.TestCase):
     def test_local_copy_is_byte_identical_to_reference(self):
         local = Path(tap.__file__).parent / "reflex_sim.py"
         self.assertTrue(local.exists())
+        # The reference is an external workstation path and is not
+        # part of a normal GitHub Actions checkout. Compare it only when
+        # an operator explicitly provides that file in the test environment.
+        if not REF.exists():
+            self.skipTest("external reference file is not present in this CI environment")
         self.assertEqual(hashlib.sha256(local.read_bytes()).hexdigest(),
                          hashlib.sha256(REF.read_bytes()).hexdigest())
 
