@@ -9,9 +9,7 @@ python3 server.py --port 8080
 # open http://127.0.0.1:8080/  (on a phone on the same Wi-Fi, use the machine's LAN address instead of 127.0.0.1)
 ```
 
-First run: set an owner password (8+ characters) on Home, sign in as
-owner, add an artist, set that artist's password, then sign in as the
-artist. The app starts empty — no demo artists, bookings, or sales.
+First run: configure the Render environment variable `TAP_OWNER_SETUP_TOKEN` with a high-entropy one-time bootstrap secret. Enter that token and an owner password (8+ characters) on Home, then sign in as owner. Add an artist, set that artist's password, then sign in as the artist. The app starts empty — no demo artists, bookings, or sales. Owner bootstrap is disabled when the environment variable is absent.
 
 ## What it does, with the real engine
 
