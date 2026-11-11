@@ -1,0 +1,20 @@
+# Minimal CI: run the test suite on every push and pull request.
+# The apps are stdlib-only, so there is nothing to install — the
+# workflow runs the same command used locally:
+#   python -m pytest tests/ -q
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run test suite
+        run: python -m pytest tests/ -q
