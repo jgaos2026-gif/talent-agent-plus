@@ -47,6 +47,7 @@ Limits, stated so they cannot drift:
 - Tokens are stored in the browser's localStorage in v1. A packaged
   phone app must move them to the platform secure storage.
 """
+import hmac
 import json
 import os
 import sys
@@ -211,6 +212,12 @@ class Handler(BaseHTTPRequestHandler):
         tok = self._token()
         try:
             if path == "/api/setup-owner":
+                bootstrap = os.environ.get("TAP_OWNER_SETUP_TOKEN", "")
+                supplied = body.get("setup_token", "")
+                if not bootstrap:
+                    return self._send(503, {"error": "owner bootstrap is disabled; configure TAP_OWNER_SETUP_TOKEN"})
+                if not isinstance(supplied, str) or not hmac.compare_digest(supplied, bootstrap):
+                    return self._send(403, {"error": "invalid owner bootstrap credential"})
                 APP.create_owner(body["password"])
                 return self._send(200, {"ok": True})
             if path == "/api/login-owner":
