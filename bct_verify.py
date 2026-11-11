@@ -51,6 +51,72 @@ two app gates always pass their registry, so the enforced path is the
 anchored one. A registry that lives only in memory is lost on restart:
 the gates persist `_bct_chain_head` in the app snapshot (see the
 save/load tests), and a head must never be seeded from untrusted input.
+
+ROUND 3 — canonical numbers (finding G): non-integral floats are hashed
+through `canonical_number` (shared spec with the TypeScript hashOf):
+integer-valued floats hash as their exact integer, other finite floats
+as shortest-round-trip scientific notation (`1.5` -> `1.5e+0`,
+`0.000001` -> `1e-6`). Python `json.dumps` and JS `JSON.stringify`
+disagree on floats (`1e-06` vs `0.000001`), so hashing raw dumps made
+the two verifiers disagree; the canonical form is the same bytes in
+both languages. Non-finite numbers are rejected, never hashed.
+Boundary (pinned by the test vectors, reconciled with the TypeScript
+side in round 3): the integer form applies when the value is
+integer-valued AND its shortest representation has no non-zero
+fractional digits — i.e. the mantissa of the shortest repr, trailing
+zeros stripped, has no fractional part (`1e21` ->
+`"1000000000000000000000"`, `100.0` -> `"100"`). When the shortest
+mantissa does carry fractional digits, the value takes scientific
+form even if it is integer-valued as a double
+(`1.7976931348623157e308` -> `"1.7976931348623157e+308"`). This is a
+pure function of the number's shortest digits, so both languages
+agree on every value; the earlier 1e21 magnitude boundary is
+superseded.
+
+ROUND 3 — naming (finding F): the transition hash is an unkeyed SHA-256
+binding — `hashOf({stateHash, priorStateHash})`. It binds a state to its
+prior; it authenticates nothing and no name in this module claims
+otherwise. (The TypeScript side renamed its braid binding to
+`braidBindingHash` in round 3; there is no Python counterpart to
+rename — see the round-3 report.)
+
+ROUND 3 — incomplete anchored arguments: `verify_transition` rejects
+explicitly when exactly one of `registry`/`identity` is supplied.
+Anchored verification needs both; one without the other used to fall
+back silently to unanchored verification.
+
+ROUND 3 — registry validation: `BctHeadRegistry.register` (and
+`advance`) accept only well-formed `sha256:` + 64-hex heads and
+non-empty string identities, and raise `BctVerificationError` on
+anything else. Seeding a head stays an operator trust action — the
+validation only stops malformed values, it does not make an untrusted
+seed trustworthy.
+
+ROUND 3 — ledger cross-check (finding H): `verify_head_against_ledger`
+verifies a local head against an evidence ledger through a
+ledger-reader interface (list of rows, callable, or object with
+`read_entries()`/`entries`). It re-verifies the ledger chain itself,
+then requires the head to equal the latest entry's `payload_hash` —
+the entry that records that head. This module never talks to Supabase
+and takes no credentials; the caller supplies the reader. The apps do
+NOT yet record certified heads as evidence entries or call this on
+startup — wiring that is operator work; see the function's docstring
+for exactly what enabling it takes.
+
+WHY TWO COPIES (shared-package evaluation, round 3): the two Python
+verifier copies should eventually be one shared package, but not by
+breaking the apps to get there. Both apps deploy separately on Render
+from their own repos with `buildCommand: echo "stdlib only - no build
+step"`, no requirements file, and `import bct_verify` from the repo
+root; both test suites import it the same way. A shared package would
+need a third repo plus a `pip install` from a git URL in each Render
+build (a new network dependency at deploy time, plus version-pinning
+and skew questions: the two apps could silently run different verifier
+versions), and a rewrite of every `import bct_verify` in both apps and
+their tests. That is a deploy-contract change, not a code move, and it
+needs John's call. Until then the copies stay byte-identical mirrors
+(MD5-checked after every edit) — that check is what stops them
+drifting apart.
 """
 
 from __future__ import annotations
@@ -58,17 +124,20 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from decimal import Decimal
 
 __all__ = [
     "GENESIS",
     "BctVerificationError",
     "BctHeadRegistry",
+    "canonical_number",
     "stable_stringify",
     "hash_of",
     "state_hash",
     "compute_transition_hash",
     "verify_transition",
     "verify_ledger_rows",
+    "verify_head_against_ledger",
 ]
 
 GENESIS = "GENESIS"
@@ -84,9 +153,74 @@ class BctVerificationError(Exception):
 
 # -- canonical hashing (byte-compatible with TS hashOf) ------------------
 
+def _shortest_has_fraction(value):
+    """True if the shortest repr of a float carries non-zero fractional
+    digits — i.e. the mantissa of repr(value), trailing zeros stripped,
+    has a fractional part. This is the shared rule with the TypeScript
+    canonicalNumber: the integer form applies only when this is False.
+    (`100.0` -> repr `100.0` -> fractional `0` -> stripped empty ->
+    False; `1e21` -> repr `1e+21` -> no dot -> False; `1.5` -> `5` ->
+    True; `1.7976931348623157e308` -> `7976931348623157` -> True.)"""
+    text = repr(value)
+    mantissa = text.split("e")[0].split("E")[0]
+    if "." not in mantissa:
+        return False
+    return len(mantissa.split(".", 1)[1].rstrip("0")) > 0
+
+
+def canonical_number(value):
+    """Canonical decimal string for one JSON number — the SHARED spec
+    implemented identically by the TypeScript `hashOf` (finding G).
+
+      * ints, and integer-valued floats whose shortest repr has no
+        non-zero fractional digits: the exact integer value as a
+        decimal string, no decimal point, no exponent (`1.0` -> `"1"`,
+        `1e21` -> `"1000000000000000000000"`). Negative zero
+        normalizes to `"0"`. When the shortest mantissa does carry
+        fractional digits, the value takes scientific form even if it
+        is integer-valued as a double (`1.7976931348623157e308` ->
+        `"1.7976931348623157e+308"`).
+      * non-integral finite floats: scientific notation with the
+        shortest round-trip digits — one digit, optional `"."` +
+        remaining digits (no trailing zeros), then `"e"`, then a
+        signed exponent with an explicit sign and no leading zeros
+        (`0.000001` -> `"1e-6"`, `1.5` -> `"1.5e+0"`,
+        `123456.789` -> `"1.23456789e+5"`, `0.1` -> `"1e-1"`).
+      * non-finite (NaN, Infinity): rejected with ValueError — JSON
+        cannot represent them, so they are never hashed.
+
+    Digits come from `repr(value)`, which is the shortest round-trip
+    representation in CPython; `Decimal(repr(value))` parses those
+    digits exactly (no binary-float noise leaks in). Bools are rejected
+    (a bool is an `int` subclass in Python, but it is not a number
+    here — `stable_stringify` handles bools before reaching this).
+    """
+    if isinstance(value, bool):
+        raise TypeError("canonical_number takes a number, not a bool")
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("non-finite numbers cannot be hashed")
+        if value == 0:
+            return "0"
+        if value.is_integer() and not _shortest_has_fraction(value):
+            return str(int(value))
+        dec = Decimal(repr(value))
+        digits = "".join(str(d) for d in dec.as_tuple().digits)
+        exponent = dec.adjusted()
+        sign = "-" if dec.as_tuple().sign else ""
+        mantissa = digits if len(digits) == 1 else digits[0] + "." + digits[1:]
+        return "%s%se%+d" % (sign, mantissa, exponent)
+    raise TypeError("canonical_number takes an int or float, got %r"
+                    % type(value).__name__)
+
+
 def stable_stringify(value):
     """Mirror of TS `stableStringify`: JSON with object keys sorted,
-    no spaces, strings JSON-escaped. Non-JSON values are rejected."""
+    no spaces, strings JSON-escaped. Non-JSON values are rejected.
+    Numbers go through `canonical_number` so the hashed bytes match
+    the TypeScript verifier exactly (finding G)."""
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -94,11 +228,7 @@ def stable_stringify(value):
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
-        if value != value or value in (float("inf"), float("-inf")):
-            raise ValueError("non-finite numbers cannot be hashed")
-        if value.is_integer():
-            return str(int(value))
-        return json.dumps(value)
+        return canonical_number(value)
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, (list, tuple)):
@@ -137,6 +267,14 @@ def compute_transition_hash(state_hash_value: str, prior_state_hash: str) -> str
 
 # -- transition verification (fixed BctVerifier layer 5) -----------------
 
+def _is_well_formed_hash(value):
+    """True only for a well-formed head: `sha256:` + 64 lowercase hex
+    chars (the exact output shape of `hash_of` / `state_hash`)."""
+    return (isinstance(value, str)
+            and value.startswith(_SHA256_PREFIX)
+            and _SHA256_DIGEST_RE.match(value[len(_SHA256_PREFIX):]) is not None)
+
+
 class BctHeadRegistry(dict):
     """Authoritative registry of known chain heads, one per identity.
 
@@ -145,6 +283,13 @@ class BctHeadRegistry(dict):
     recorded here as a transition's parent — never a hash the caller
     merely asserts. Seed with :meth:`register` from a durable record
     you trust; never seed from caller-supplied input.
+
+    Round 3: every write through :meth:`register` or :meth:`advance`
+    is validated — the identity must be a non-empty string and the head
+    a well-formed `sha256:` hash, or `BctVerificationError` is raised
+    and nothing is stored. (Direct item assignment bypasses that check;
+    do not seed heads that way.) Validation stops malformed values; it
+    does not make an untrusted seed trustworthy.
     """
 
     def head(self, identity):
@@ -156,16 +301,32 @@ class BctHeadRegistry(dict):
         return identity in self
 
     def register(self, identity, state_hash):
-        """Seed (or re-seed) a head. Operator/caller trust action."""
+        """Seed (or re-seed) a head. Operator/caller trust action.
+        Raises `BctVerificationError` (and stores nothing) unless the
+        identity is a non-empty string and the head is a well-formed
+        `sha256:` hash."""
+        if not isinstance(identity, str) or identity == "":
+            raise BctVerificationError(
+                "registry identity must be a non-empty string, got %r"
+                % (identity,))
+        if not _is_well_formed_hash(state_hash):
+            raise BctVerificationError(
+                "registry head must be a well-formed 'sha256:' hash "
+                "(64 hex chars), got %r" % (state_hash,))
         self[identity] = state_hash
 
     def advance(self, identity, expected_prior, new_hash):
         """Advance the head after a trusted transition. Returns False
         (and changes nothing) unless the recorded head equals the
         expected prior — a competing branch can never silently
-        overwrite the head."""
+        overwrite the head. Raises `BctVerificationError` (and stores
+        nothing) if the new head is not a well-formed `sha256:` hash."""
         if self.get(identity) != expected_prior:
             return False
+        if not _is_well_formed_hash(new_hash):
+            raise BctVerificationError(
+                "registry head must be a well-formed 'sha256:' hash "
+                "(64 hex chars), got %r" % (new_hash,))
         self[identity] = new_hash
         return True
 
@@ -196,10 +357,23 @@ def verify_transition(prior_state_hash, new_state, declared_hash,
     On success in anchored mode the registry advances to the declared
     hash, so the next transition must chain from THIS state.
 
+    Anchored verification requires BOTH `registry` and `identity`.
+    Supplying exactly one of them is rejected explicitly — it never
+    falls back silently to unanchored (chaining-only) verification.
+    Supply neither for chaining-only verification.
+
     Any failure returns (False, reason). Bad input values never raise —
     they fail closed here.
     """
-    anchored = registry is not None and identity is not None
+    registry_supplied = registry is not None
+    identity_supplied = isinstance(identity, str) and identity != ""
+    if registry_supplied != identity_supplied:
+        return False, ("Anchored verification requires both a registry "
+                       "and an identity — a registry without an identity "
+                       "(or an identity without a registry) is rejected; "
+                       "supply both for anchored verification, or neither "
+                       "for chaining-only verification.")
+    anchored = registry_supplied and identity_supplied
     try:
         if prior_state_hash is None or prior_state_hash == "" \
                 or prior_state_hash == GENESIS:
@@ -359,3 +533,107 @@ def verify_ledger_rows(rows, flavor: str = "auto"):
             continue
         expected_prev = entry_hash
     return (len(failures) == 0), failures
+
+
+# -- ledger cross-check (finding H) --------------------------------------
+
+def _read_ledger_entries(ledger_reader):
+    """Resolve a ledger reader to a list of row dicts.
+
+    The reader interface — the seam between this module and wherever
+    the ledger actually lives — accepts:
+      * a list/tuple of row dicts (tests, in-memory stand-ins);
+      * a callable returning rows;
+      * an object with a `read_entries()` method;
+      * an object with an `entries` attribute (a list, or a callable
+        returning one).
+    Raises TypeError for anything else. This module never opens a
+    network connection and takes no credentials: a Supabase-backed
+    reader is the caller's adapter, not this module's job.
+    """
+    if isinstance(ledger_reader, (list, tuple)):
+        return list(ledger_reader)
+    if callable(ledger_reader):
+        return list(ledger_reader())
+    read_entries = getattr(ledger_reader, "read_entries", None)
+    if callable(read_entries):
+        return list(read_entries())
+    entries = getattr(ledger_reader, "entries", None)
+    if entries is not None:
+        return list(entries() if callable(entries) else entries)
+    raise TypeError("ledger_reader must be a list of rows, a callable "
+                    "returning rows, or an object with read_entries()/entries")
+
+
+def _ledger_tip(rows):
+    """The latest ledger row: highest `seq` when every row carries one,
+    otherwise the last row as given."""
+    if all(isinstance(r, dict) and isinstance(r.get("seq"), int)
+           for r in rows):
+        return sorted(rows, key=lambda r: r["seq"])[-1]
+    return rows[-1]
+
+
+def verify_head_against_ledger(head, ledger_reader, flavor="auto"):
+    """Cross-check a local chain head against the evidence ledger.
+    Returns (ok, reason). Fail closed: a corrupt ledger, an empty
+    ledger, a failing reader, or a head that is not the ledger's latest
+    recorded head all return (False, reason) — never True.
+
+    What it checks, in order:
+      1. the head is a well-formed `sha256:` hash;
+      2. the ledger reads, and its chain re-verifies
+         (`verify_ledger_rows`) — a tampered ledger anchors nothing;
+      3. the head equals the latest entry's `payload_hash` — the entry
+         that records that head.
+
+    The contract the ledger side must keep: every certified transition
+    is recorded as an evidence entry whose `payload_hash` IS the
+    declared head for that transition. Without that, the latest entry
+    records some other value and the check (correctly) fails.
+
+    What the operator enables, and how (NOT wired here — mechanism
+    only, no live Supabase, no credentials in this module):
+      1. Record — on each certified transition, append an evidence
+         entry with `payload_hash` = the declared head (TAP:
+         `tap_append_evidence`; JGA: the brick1 append). The apps do
+         not do this yet.
+      2. Read — supply a `ledger_reader` that returns the ledger's
+         rows in tap/brick1 shape, e.g. a small adapter that SELECTs
+         the evidence table through the app's Supabase store.
+      3. Check — call this before trusting a head restored from a
+         snapshot (e.g. at startup, after load): on False, do NOT
+         trust the head — re-derive it from a trusted source or halt;
+         a snapshot file an operator can rewrite is not a trust root
+         on its own. (The `verify_ledger_rows` empty-ledger rule does
+         NOT apply here: an empty ledger has no recorded head, so it
+         cannot anchor anything.)
+    """
+    if not _is_well_formed_hash(head):
+        return False, ("local head is malformed — not a well-formed "
+                       "'sha256:' hash; it cannot be anchored to any "
+                       "ledger")
+    try:
+        rows = _read_ledger_entries(ledger_reader)
+    except Exception as e:
+        return False, "ledger reader failed: %s" % e
+    if not rows:
+        return False, ("evidence ledger is empty — no recorded head to "
+                       "anchor the local head against")
+    ok, failures = verify_ledger_rows(rows, flavor=flavor)
+    if not ok:
+        return False, ("evidence ledger failed verification (%s) — local "
+                       "head cannot be trusted" % "; ".join(failures))
+    tip = _ledger_tip(rows)
+    recorded = tip.get("payload_hash") if isinstance(tip, dict) else None
+    if recorded is None:
+        return False, ("latest evidence-ledger entry records no head "
+                       "(payload_hash missing) — local head cannot be "
+                       "anchored")
+    if recorded != head:
+        return False, ("local head does not match the latest "
+                       "evidence-ledger entry — stale, forged, or "
+                       "ahead-of-ledger head rejected (ledger tip "
+                       "records %r)" % (recorded,))
+    return True, ("local head matches the latest evidence-ledger entry — "
+                  "anchored to a verified ledger chain")

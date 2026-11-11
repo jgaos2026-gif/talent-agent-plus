@@ -668,8 +668,11 @@ class TalentAgent:
         from this dict, never from a caller — a caller cannot inject a
         parent. The dict itself is the anchor: if it (or the snapshot
         file it persists to) is tampered with, this layer cannot tell —
-        cross-checking heads against the evidence ledger is the
-        remaining hardening step (see the red-team report). Returns the new state hash and advances the
+        cross-checking a restored head against the evidence ledger is
+        now available as `bct_verify.verify_head_against_ledger`
+        (round 3: mechanism only — the app does not yet record heads
+        as evidence entries or call it on startup; see its docstring
+        for what enabling it takes). Returns the new state hash and advances the
         chain head. Raises AgentError and records the rejection on any
         failure: the transition must not proceed."""
         prior = self._bct_chain_head.get(booking.booking_id, bct_verify.GENESIS)
