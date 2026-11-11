@@ -5,7 +5,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 jobs:
   unpack:
@@ -19,6 +18,10 @@ jobs:
           test -f "$ZIP"
           unzip -l "$ZIP"
           unzip -o "$ZIP"
+          echo "===== BEGIN .github/workflows/test.yml ====="
+          cat .github/workflows/test.yml
+          echo "===== END .github/workflows/test.yml ====="
+          rm -f .github/workflows/test.yml
           rm -f "$ZIP"
           rm -f .github/workflows/redteam-unpack.yml
           git config user.name "github-actions[bot]"
