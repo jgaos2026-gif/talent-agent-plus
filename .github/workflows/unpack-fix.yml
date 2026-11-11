@@ -1,0 +1,22 @@
+name: Unpack fix zip (one-time)
+on:
+  workflow_dispatch:
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack zip, commit fix, remove zip and workflow
+        run: |
+          set -e
+          unzip -o push-talent-agent-plus.zip
+          rm push-talent-agent-plus.zip
+          rm .github/workflows/unpack-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git status --short
+          git commit -m "feat: integrate BCT verification into talent_agent_plus"
+          git push
