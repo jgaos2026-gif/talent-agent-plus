@@ -31,7 +31,18 @@ class TestApp(unittest.TestCase):
         cls.port = cls.srv.server_address[1]
         cls.base = "http://127.0.0.1:%d" % cls.port
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
-        _, r = call(cls.base, "/api/setup-owner", {"password": "owner-pass-123"})
+        os.environ["TAP_OWNER_SETUP_TOKEN"] = "test-only-bootstrap-token"
+        # Bootstrap fails closed for missing and incorrect credentials.
+        _, denied = call(cls.base, "/api/setup-owner", {"password": "owner-pass-123"})
+        assert denied.get("error")
+        _, denied = call(cls.base, "/api/setup-owner", {
+            "password": "owner-pass-123", "setup_token": "wrong-token"
+        })
+        assert denied.get("error")
+        _, r = call(cls.base, "/api/setup-owner", {
+            "password": "owner-pass-123",
+            "setup_token": os.environ["TAP_OWNER_SETUP_TOKEN"]
+        })
         assert r.get("ok")
         _, r = call(cls.base, "/api/login-owner", {"password": "owner-pass-123"})
         cls.owner = r["token"]
