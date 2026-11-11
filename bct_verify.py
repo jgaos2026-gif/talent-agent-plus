@@ -34,6 +34,23 @@ client, no app imports — importable on its own.
 Fail closed everywhere: every failure returns a rejection, never a pass.
 `verify_transition` and `verify_ledger_rows` return results; they do not
 raise for bad input values. Only wrong argument types raise.
+
+FINDING 15 — prior-state anchoring (mirrors BctVerifier's registry):
+knowing two hashes used to be enough to forge a transition, because
+`verify_transition` accepted ANY well-formed prior with a matching
+transition hash (and transition hashes are just sha256 — anyone can
+compute one). Pass the caller's authoritative head registry
+(`identity=` + `registry=`, e.g. the app's `_bct_chain_head` dict) and
+the rule becomes: a non-genesis prior must EQUAL the registered head
+for that identity — forged, stale (old), and competing-branch parents
+are rejected; genesis needs `allow_genesis=True` AND no registered head
+for the identity; on success the registry advances to the new hash.
+Without a registry the function still checks chaining only — it CANNOT
+detect a forged/stale/branching parent, and the docstring says so; the
+two app gates always pass their registry, so the enforced path is the
+anchored one. A registry that lives only in memory is lost on restart:
+the gates persist `_bct_chain_head` in the app snapshot (see the
+save/load tests), and a head must never be seeded from untrusted input.
 """
 
 from __future__ import annotations
@@ -45,6 +62,7 @@ import re
 __all__ = [
     "GENESIS",
     "BctVerificationError",
+    "BctHeadRegistry",
     "stable_stringify",
     "hash_of",
     "state_hash",
@@ -119,26 +137,81 @@ def compute_transition_hash(state_hash_value: str, prior_state_hash: str) -> str
 
 # -- transition verification (fixed BctVerifier layer 5) -----------------
 
+class BctHeadRegistry(dict):
+    """Authoritative registry of known chain heads, one per identity.
+
+    A dict subclass, so the apps' existing ``_bct_chain_head`` dicts can
+    be passed as a registry as-is. The verifier trusts ONLY the head
+    recorded here as a transition's parent — never a hash the caller
+    merely asserts. Seed with :meth:`register` from a durable record
+    you trust; never seed from caller-supplied input.
+    """
+
+    def head(self, identity):
+        """Current registered head for an identity, or None."""
+        return self.get(identity)
+
+    def has(self, identity):
+        """True when the identity has a registered head."""
+        return identity in self
+
+    def register(self, identity, state_hash):
+        """Seed (or re-seed) a head. Operator/caller trust action."""
+        self[identity] = state_hash
+
+    def advance(self, identity, expected_prior, new_hash):
+        """Advance the head after a trusted transition. Returns False
+        (and changes nothing) unless the recorded head equals the
+        expected prior — a competing branch can never silently
+        overwrite the head."""
+        if self.get(identity) != expected_prior:
+            return False
+        self[identity] = new_hash
+        return True
+
+
 def verify_transition(prior_state_hash, new_state, declared_hash,
-                      transition_hash):
+                      transition_hash, identity=None, registry=None,
+                      allow_genesis=False):
     """Verify one state transition. Returns (ok, reason).
 
     Rules, in order (mirroring fixed `layerTransaction`):
       1. Genesis — prior is None, "" or "GENESIS": the first transition;
-         the declared hash must still bind the new state.
+         the declared hash must still bind the new state. When a
+         registry is supplied (anchored mode), genesis ALSO needs
+         `allow_genesis=True` and the identity must have no registered
+         head — an identity with a head can never start over.
       2. Prior must be a well-formed `sha256:` hash.
-      3. Declared hash must equal the hash of the supplied new state
+      3. ANCHORED ONLY (registry supplied): the prior must equal the
+         registered head for `identity` — a forged, stale, or
+         branching parent is rejected. Without a registry this check
+         cannot run: chaining is still verified, but the parent is
+         NOT anchored — see the module docstring.
+      4. Declared hash must equal the hash of the supplied new state
          (layer-3 binding — see module docstring).
-      4. No-op rejected — declared hash equal to prior hash is not a
+      5. No-op rejected — declared hash equal to prior hash is not a
          new state.
-      5. Transition hash must equal the expected chained hash.
+      6. Transition hash must equal the expected chained hash.
+
+    On success in anchored mode the registry advances to the declared
+    hash, so the next transition must chain from THIS state.
 
     Any failure returns (False, reason). Bad input values never raise —
     they fail closed here.
     """
+    anchored = registry is not None and identity is not None
     try:
         if prior_state_hash is None or prior_state_hash == "" \
                 or prior_state_hash == GENESIS:
+            if anchored:
+                if not allow_genesis:
+                    return False, ("Genesis transition requires explicit "
+                                   "authorization (allow_genesis) — genesis "
+                                   "without it is rejected.")
+                if identity in registry:
+                    return False, ("Genesis rejected — this identity already "
+                                   "has a registered chain head; starting "
+                                   "over would fork the chain.")
             if not isinstance(declared_hash, str):
                 return False, "declared hash is missing"
             try:
@@ -147,10 +220,22 @@ def verify_transition(prior_state_hash, new_state, declared_hash,
                 return False, "new state is not hashable: %s" % e
             if declared_hash != actual:
                 return False, "declared hash does not match the new state"
-            return True, "Genesis transition — no prior hash required."
+            if anchored:
+                registry[identity] = declared_hash
+            return True, "Authorized genesis transition — no prior hash required."
         if not isinstance(prior_state_hash, str) \
                 or not prior_state_hash.startswith(_SHA256_PREFIX):
             return False, "Prior state hash is malformed — transaction chain broken."
+        if anchored:
+            head = registry.get(identity)
+            if head is None:
+                return False, ("Prior state is not a registered chain head "
+                               "for this identity — unanchored parent "
+                               "rejected (register the head first).")
+            if head != prior_state_hash:
+                return False, ("Prior state is not the registered chain head "
+                               "— forged, stale, or branching parent "
+                               "rejected.")
         if not isinstance(declared_hash, str):
             return False, "declared hash is missing"
         try:
@@ -166,7 +251,9 @@ def verify_transition(prior_state_hash, new_state, declared_hash,
         if transition_hash != expected:
             return False, ("Transition hash does not bind the new state to "
                            "the prior state — unchained transition rejected.")
-        return True, "Transition is chained to the prior state and changes state."
+        if anchored:
+            registry[identity] = declared_hash
+        return True, "Transition is chained to the registered prior state and changes state."
     except (TypeError, ValueError) as e:
         return False, "invalid transition input: %s" % e
 

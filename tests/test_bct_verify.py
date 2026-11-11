@@ -144,6 +144,118 @@ class TransitionTests(unittest.TestCase):
         self.assertIn("does not match", reason)
 
 
+class RegistryTests(unittest.TestCase):
+    """Finding 15: prior-state anchoring via BctHeadRegistry.
+
+    Knowing two hashes is no longer enough to forge a transition: the
+    prior must be the registered head for the identity.
+    """
+
+    def _states(self):
+        s1 = {"booking_id": "booking-0001", "state": "OFFERED"}
+        d1 = bct_verify.state_hash(s1)
+        s2 = {"booking_id": "booking-0001", "state": "APPROVED"}
+        d2 = bct_verify.state_hash(s2)
+        s3 = {"booking_id": "booking-0001", "state": "COMPLETED"}
+        d3 = bct_verify.state_hash(s3)
+        return s1, d1, s2, d2, s3, d3
+
+    def test_forged_parent_rejected(self):
+        _, d1, s2, d2, _, _ = self._states()
+        reg = bct_verify.BctHeadRegistry()
+        t2 = bct_verify.compute_transition_hash(d2, d1)
+        ok, reason = bct_verify.verify_transition(
+            d1, s2, d2, t2, identity="booking-0001", registry=reg)
+        self.assertFalse(ok)
+        self.assertIn("registered chain head", reason)
+
+    def test_unauthorized_genesis_rejected(self):
+        s1, d1, _, _, _, _ = self._states()
+        reg = bct_verify.BctHeadRegistry()
+        t1 = bct_verify.compute_transition_hash(d1, "GENESIS")
+        ok, reason = bct_verify.verify_transition(
+            "GENESIS", s1, d1, t1, identity="booking-0001", registry=reg)
+        self.assertFalse(ok)
+        self.assertIn("allow_genesis", reason)
+
+    def test_authorized_genesis_advances_registry_then_second_genesis_rejected(self):
+        s1, d1, s2, d2, _, _ = self._states()
+        reg = bct_verify.BctHeadRegistry()
+        t1 = bct_verify.compute_transition_hash(d1, "GENESIS")
+        ok, reason = bct_verify.verify_transition(
+            "GENESIS", s1, d1, t1, identity="booking-0001", registry=reg,
+            allow_genesis=True)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reg["booking-0001"], d1)
+        t2 = bct_verify.compute_transition_hash(d2, "GENESIS")
+        ok, _ = bct_verify.verify_transition(
+            "GENESIS", s2, d2, t2, identity="booking-0001", registry=reg,
+            allow_genesis=True)
+        self.assertFalse(ok)
+
+    def test_old_parent_rejected_after_head_moves_on(self):
+        _, d1, s2, d2, s3, d3 = self._states()
+        reg = bct_verify.BctHeadRegistry()
+        reg.register("booking-0001", d1)
+        t2 = bct_verify.compute_transition_hash(d2, d1)
+        ok, reason = bct_verify.verify_transition(
+            d1, s2, d2, t2, identity="booking-0001", registry=reg)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reg["booking-0001"], d2)
+        t3 = bct_verify.compute_transition_hash(d3, d1)
+        ok, reason = bct_verify.verify_transition(
+            d1, s3, d3, t3, identity="booking-0001", registry=reg)
+        self.assertFalse(ok)
+        self.assertIn("registered chain head", reason)
+
+    def test_competing_branch_rejected(self):
+        _, d1, s2, d2, s3, d3 = self._states()
+        reg = bct_verify.BctHeadRegistry()
+        reg.register("booking-0001", d1)
+        t2 = bct_verify.compute_transition_hash(d2, d1)
+        ok, _ = bct_verify.verify_transition(
+            d1, s2, d2, t2, identity="booking-0001", registry=reg)
+        self.assertTrue(ok)
+        # A different state claiming the same parent is a competing branch.
+        t3 = bct_verify.compute_transition_hash(d3, d1)
+        ok, _ = bct_verify.verify_transition(
+            d1, s3, d3, t3, identity="booking-0001", registry=reg)
+        self.assertFalse(ok)
+
+    def test_sequential_chain_verifies_and_advances(self):
+        s1, d1, s2, d2, s3, d3 = self._states()
+        reg = bct_verify.BctHeadRegistry()
+        t1 = bct_verify.compute_transition_hash(d1, "GENESIS")
+        ok, reason = bct_verify.verify_transition(
+            "GENESIS", s1, d1, t1, identity="booking-0001", registry=reg,
+            allow_genesis=True)
+        self.assertTrue(ok, reason)
+        t2 = bct_verify.compute_transition_hash(d2, d1)
+        ok, reason = bct_verify.verify_transition(
+            d1, s2, d2, t2, identity="booking-0001", registry=reg)
+        self.assertTrue(ok, reason)
+        t3 = bct_verify.compute_transition_hash(d3, d2)
+        ok, reason = bct_verify.verify_transition(
+            d2, s3, d3, t3, identity="booking-0001", registry=reg)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reg["booking-0001"], d3)
+
+    def test_plain_dict_registry_works_like_the_app_gates_use_it(self):
+        # The gates pass their plain _bct_chain_head dict as the registry.
+        s1, d1, s2, d2, _, _ = self._states()
+        reg = {}
+        t1 = bct_verify.compute_transition_hash(d1, "GENESIS")
+        ok, reason = bct_verify.verify_transition(
+            "GENESIS", s1, d1, t1, identity="booking-0001", registry=reg,
+            allow_genesis=True)
+        self.assertTrue(ok, reason)
+        t2 = bct_verify.compute_transition_hash(d2, d1)
+        ok, reason = bct_verify.verify_transition(
+            d1, s2, d2, t2, identity="booking-0001", registry=reg)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reg["booking-0001"], d2)
+
+
 class LedgerTests(unittest.TestCase):
     def _tap_chain(self, n=3):
         rows, prev = [], None
