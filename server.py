@@ -49,6 +49,7 @@ Limits, stated so they cannot drift:
 """
 import json
 import os
+import hmac
 import sys
 from dataclasses import asdict, is_dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
