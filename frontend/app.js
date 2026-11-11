@@ -18,7 +18,7 @@ async function api(path, body, method){
   return j;
 }
 function saveToken(t, p){ token=t; principal=p; localStorage.setItem("tap_token", t); localStorage.setItem("tap_principal", p); document.getElementById("who").textContent="Signed in as "+p; }
-async function setupOwner(){ try{ await api("/api/setup-owner", {password: v("pw")}); setOut("Owner password set. Now sign in as owner."); }catch(e){ setOut("Error: "+e.message); } }
+async function setupOwner(){ try{ await api("/api/setup-owner", {password: v("pw"), setup_token: v("ownerSetupToken")}); setOut("Owner password set. Now sign in as owner."); }catch(e){ setOut("Error: "+e.message); } }
 async function loginOwner(){ try{ var j=await api("/api/login-owner", {password: v("pw")}); saveToken(j.token, j.principal); setOut("Signed in as owner."); }catch(e){ setOut("Error: "+e.message); } }
 async function loginArtist(){ try{ var j=await api("/api/login-artist", {artist_id: v("artistId"), password: v("artistPw")}); saveToken(j.token, j.principal); setOut("Signed in as artist "+j.principal+"."); }catch(e){ setOut("Error: "+e.message); } }
 async function logout(){ try{ await api("/api/logout", {}); }catch(e){} token=""; principal=""; localStorage.removeItem("tap_token"); localStorage.removeItem("tap_principal"); setOut("Signed out."); }
